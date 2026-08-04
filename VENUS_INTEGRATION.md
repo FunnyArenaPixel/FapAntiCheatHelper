@@ -53,26 +53,46 @@ if (data.cpsMax > 15 && data.cpsIntervalStd < 5.0) {
 
 ## 预留点 2：准星目标分析 → Combat/KillAura 检测
 
+### ⚠️ 触屏兼容性（v1.1.0 新增）
+
+触屏默认模式（未开启分离控制）下，玩家直接点击屏幕上的实体来攻击，
+屏幕中心准星可能完全不指向被攻击的实体。
+此模式下 `victimId != pickEntityId` 是**正常的**，不是 KillAura。
+
+| 输入模式 | 分离控制 | 准星检测 | 说明 |
+|----------|----------|----------|------|
+| 键鼠 (0) | — | ✅ 适用 | 准星固定在屏幕中心 |
+| 手柄 (2) | — | ✅ 适用 | 准星固定在屏幕中心 |
+| 触屏 (1) | 开 | ✅ 适用 | 摇杆控制准星方向 |
+| 触屏 (1) | 关 | ❌ 不适用 | 直接点击屏幕实体攻击 |
+
+客户端会在每次上报中附带 `aimCheckApplicable` 标记，
+服务端只在 `aimCheckApplicable=true` 时统计不匹配次数。
+
 ### 数据字段
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `data.aimTotalAttacks` | int | 累计攻击次数 |
-| `data.aimMismatchedAttacks` | int | 准星不匹配次数 |
-| `data.getAimMismatchRate()` | double | 不匹配率（0.0~1.0） |
+| `data.aimTotalAttacks` | int | 累计攻击次数（所有输入模式） |
+| `data.aimApplicableAttacks` | int | 准星检测适用的攻击次数 |
+| `data.aimMismatchedAttacks` | int | 准星不匹配次数（仅统计适用的攻击） |
+| `data.getAimMismatchRate()` | double | 不匹配率（0.0~1.0），无适用攻击时返回 -1.0 |
 | `data.aimLastMatch` | boolean | 最近一次攻击是否匹配 |
+| `data.aimInputMode` | int | 输入模式：-1=未知, 0=键鼠, 1=触屏, 2=手柄 |
+| `data.aimSplitControls` | boolean | 分离控制开关 |
+| `data.aimCheckApplicable` | boolean | 准星检测是否适用 |
 
 ### 建议判定逻辑
 ```java
-// KillAura/Reach 检测
-if (data.aimTotalAttacks > 10) {
-    double rate = data.getAimMismatchRate();
+// KillAura/Reach 检测（仅对准星检测适用的输入模式有效）
+if (data.aimApplicableAttacks > 10) {
+    double rate = data.getAimMismatchRate(); // 基于 aimApplicableAttacks
     if (rate > 0.3) {
         // 超过 30% 的攻击没有瞄准目标 → 高概率 KillAura
-        flag(player, "KillAura", rate, data.aimTotalAttacks);
+        flag(player, "KillAura", rate, data.aimApplicableAttacks);
     }
 }
-// 正常玩家几乎所有攻击都瞄准了目标（不匹配率 < 5%）
-// KillAura 攻击不在准星上的实体（不匹配率 > 30%）
+// 注意：触屏默认模式玩家 aimApplicableAttacks 为 0，getAimMismatchRate() 返回 -1.0
+// 应跳过判定，不要将 -1.0 误认为 100% 不匹配
 ```
 
 ### 预留位置
@@ -125,6 +145,6 @@ if (data.moveSprinting != serverSprinting) {
 ---
 
 ## 版本信息
-- FapAchBridge: v1.0.0
+- FapAchBridge: v1.1.0
 - FapACH MOD: v0.0.1
 - 客户端 MOD UUID: ea6986a9-4fde-41be-a718-0cdca2607695 (BP) / 9bb55178-696e-4f8f-8881-52957253f3a0 (RP)

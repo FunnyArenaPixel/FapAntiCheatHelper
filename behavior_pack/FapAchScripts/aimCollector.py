@@ -11,7 +11,14 @@
   KillAura/Reach：攻击了不在准星上的实体   → victimId != pickEntityId
                   或准星指向方块/空         → pickType != 'Entity'
 
-上报数据让服务端做交叉验证统计，辅助判定。
+⚠️ 触屏兼容性：
+  触屏默认模式（未开启分离控制）下，玩家直接点击屏幕上的实体来攻击，
+  屏幕中心准星可能完全不指向被攻击的实体。
+  这种模式下 victimId != pickEntityId 是正常的，不是 KillAura。
+  → 上报 aimCheckApplicable='false'，服务端据此跳过准星不匹配判定。
+
+  触屏 + 分离控制：用摇杆控制准星方向，攻击准星指向的目标 → 准星检测有效。
+  键鼠 / 手柄：准星固定在屏幕中心 → 准星检测有效。
 """
 
 import time
@@ -22,6 +29,9 @@ from FapAchScripts import modConfig
 
 _compFactory = clientApi.GetEngineCompFactory()
 
+# InputMode 枚举值（mod.common.minecraftEnum.InputMode）
+_TOUCH = 1  # Touch
+
 
 class AimCollector(object):
 
@@ -30,6 +40,10 @@ class AimCollector(object):
         self._cameraComp = None
         self._lastReportTime = 0.0
         self._cooldown = modConfig.AIM_COOLDOWN
+        # 输入模式上下文（由 clientSystem 推送）
+        # inputMode: None / 0(Mouse) / 1(Touch) / 2(GamePad)
+        self._inputMode = None
+        self._splitControls = None
 
     def bind(self, levelId):
         """在 clientSystem 初始化后绑定 levelId 并创建相机组件。"""
@@ -39,6 +53,11 @@ class AimCollector(object):
 
     def setCooldown(self, seconds):
         self._cooldown = max(0.05, float(seconds))
+
+    def updateInputContext(self, inputMode, splitControls):
+        """接收 clientSystem 推送的输入模式和分离控制状态。"""
+        self._inputMode = inputMode
+        self._splitControls = splitControls
 
     # ----------------------------------------------------------
     # 公开方法
@@ -71,13 +90,22 @@ class AimCollector(object):
         # 判定准星是否瞄准了被攻击的实体
         match = (pickType == 'Entity' and pickEntityId == victimId)
 
+        # 判断准星检测是否适用于当前输入模式
+        # 触屏默认模式（非分离控制）→ 不适用
+        isTouch = (self._inputMode == _TOUCH)
+        splitOn = (self._splitControls is True)
+        aimCheckApplicable = not (isTouch and not splitOn)
+
         report = {
-            'timestamp':   round(now * 1000),
-            'victimId':    str(victimId),
-            'pickType':    pickType,       # Entity / Block / None
-            'pickEntityId': str(pickEntityId),
-            'match':       'true' if match else 'false',   # boolean 用字符串
-            'isCrit':      'true' if args.get('isCrit') else 'false',
+            'timestamp':        round(now * 1000),
+            'victimId':         str(victimId),
+            'pickType':         pickType,       # Entity / Block / None
+            'pickEntityId':     str(pickEntityId),
+            'match':            'true' if match else 'false',
+            'isCrit':           'true' if args.get('isCrit') else 'false',
+            'inputMode':        str(self._inputMode) if self._inputMode is not None else '-1',
+            'splitControls':    'true' if self._splitControls else 'false',
+            'aimCheckApplicable': 'true' if aimCheckApplicable else 'false',
         }
 
         client.sendReport(modConfig.EVENT_AIM_REPORT, report)

@@ -121,6 +121,19 @@
 KillAura：victimId != pickEntityId → match=false（攻击了准星没瞄准的实体）
 ```
 
+**⚠️ 触屏兼容性**：
+
+触屏默认模式（未开启分离控制）下，玩家直接点击屏幕上的实体来攻击，屏幕中心准星可能完全不指向被攻击的实体。此时 `match=false` 是**正常的**，不是 KillAura。
+
+| 输入模式 | 分离控制 | 准星检测 | 说明 |
+|----------|----------|----------|------|
+| 键鼠 | — | ✅ 适用 | 准星固定在屏幕中心 |
+| 手柄 | — | ✅ 适用 | 准星固定在屏幕中心 |
+| 触屏 + 开启分离控制 | ✅ | ✅ 适用 | 摇杆控制准星方向 |
+| 触屏 + 默认模式 | ❌ | ❌ 不适用 | 直接点击屏幕实体攻击 |
+
+客户端自动检测输入模式（`OptionId.INPUT_MODE`）和分离控制开关（`OptionId.SPLIT_CONTROLS`），在每次上报中附带 `aimCheckApplicable` 标记。服务端只在 `aimCheckApplicable=true` 时统计不匹配次数。
+
 **采集数据**：
 
 | 指标 | 说明 |
@@ -130,12 +143,17 @@ KillAura：victimId != pickEntityId → match=false（攻击了准星没瞄准�
 | `pickEntityId` | 准星指向的实体 ID |
 | `match` | victimId 是否等于 pickEntityId |
 | `isCrit` | 是否暴击 |
+| `inputMode` | 输入模式（0=键鼠, 1=触屏, 2=手柄, -1=未知） |
+| `splitControls` | 是否开启分离控制 |
+| `aimCheckApplicable` | 准星检测是否适用当前输入模式 |
 
 **服务端聚合指标**：
 
 | 指标 | 说明 | 正常玩家 | KillAura |
 |------|------|----------|----------|
-| 不匹配率 | match=false 的比例 | < 5% | > 30% |
+| 不匹配率 | match=false 的比例（仅统计适用攻击） | < 5% | > 30% |
+
+> 触屏默认模式玩家：`aimApplicableAttacks` 为 0，`getAimMismatchRate()` 返回 -1.0（不适用），应跳过判定。
 
 **上报频率**：每次攻击时触发（0.15s 冷却防止刷屏）
 

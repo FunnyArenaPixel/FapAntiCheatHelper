@@ -40,6 +40,14 @@ class FapAchClient(clientApi.GetClientSystemCls()):
         # 客户端就绪标志
         self._readyNotified = False
 
+        # 输入模式检测（用于准星检测的触屏兼容性）
+        # InputMode: 0=Mouse, 1=Touch, 2=GamePad, None=未知
+        self._inputMode = None
+        self._splitControls = None
+        self._inputCheckTick = 0
+        # __init__ 时 GetLocalPlayerId() 可能返回 -1，OnUiInitFinished 中重新创建
+        self._compPlayerView = clientApi.GetEngineCompFactory().CreatePlayerView(self._playerId)
+
         self._listenEvents()
 
         print('[FapACH] Client system initialized. playerId=%s levelId=%s' % (
@@ -84,9 +92,15 @@ class FapAchClient(clientApi.GetClientSystemCls()):
         self._playerId = clientApi.GetLocalPlayerId()
         self._levelId = clientApi.GetLevelId()
 
+        # 重新创建 PlayerView 组件（此时 playerId 有效）
+        self._compPlayerView = clientApi.GetEngineCompFactory().CreatePlayerView(self._playerId)
+
         # 绑定采集器
         self._aim.bind(self._levelId)
         self._move.bind(self._playerId)
+
+        # 立即检测一次输入模式
+        self._checkInputMode()
 
         # 通知服务端客户端就绪
         if not self._readyNotified:
@@ -104,6 +118,12 @@ class FapAchClient(clientApi.GetClientSystemCls()):
 
     def _onTick(self, args):
         """脚本刻回调（每秒 30 次）。"""
+        # 输入模式检测（每秒一次 = 每 30 tick）
+        self._inputCheckTick += 1
+        if self._inputCheckTick >= 30:
+            self._inputCheckTick = 0
+            self._checkInputMode()
+
         if self._enableCps:
             self._cps.onTick(self)
         if self._enableMove:
@@ -116,6 +136,30 @@ class FapAchClient(clientApi.GetClientSystemCls()):
     def _onAttackEntity(self, args):
         """攻击实体事件 — 准星目标采集。"""
         self._aim.onAttackEntity(self, args)
+
+    # ==========================================================
+    # 输入模式检测（准星检测的触屏兼容性）
+    # ==========================================================
+
+    def _checkInputMode(self):
+        """
+        检测当前输入模式和分离控制开关。
+        触屏默认模式（非分离控制）下，玩家直接点击屏幕上的实体来攻击，
+        屏幕中心准星不一定指向被攻击的实体，准星检测不适用。
+        """
+        if not self._compPlayerView:
+            return
+        try:
+            mcEnum = clientApi.GetMinecraftEnum()
+            newMode = self._compPlayerView.GetToggleOption(mcEnum.OptionId.INPUT_MODE)
+            newSplit = self._compPlayerView.GetToggleOption(mcEnum.OptionId.SPLIT_CONTROLS)
+            if newMode != self._inputMode or newSplit != self._splitControls:
+                self._inputMode = newMode
+                self._splitControls = newSplit
+                self._aim.updateInputContext(newMode, newSplit)
+                print('[FapACH] Input: mode=%s splitControls=%s' % (newMode, newSplit))
+        except Exception as e:
+            print('[FapACH] _checkInputMode error: %s' % e)
 
     # ==========================================================
     # 配置同步回调

@@ -112,9 +112,15 @@ if (data.aimApplicableAttacks > 10) {
 | `data.moveSneaking` | boolean | 客户端是否潜行 |
 | `data.moveInWater` | boolean | 客户端是否在水中 |
 | `data.moveOnLadder` | boolean | 客户端是否在梯子上 |
-| `data.moveInputX/Y` | double | 移动轮盘输入向量 |
+| `data.moveGliding` | boolean | 客户端是否鞘翅飞行 |
+| `data.moveInputX/Y` | double | 移动轮盘输入向量（方向，非速度） |
 
-### 建议判定逻辑
+### Sprint Hack 检测
+
+**作弊变种**：全向疾跑（侧面/后方享受疾跑速度）、无声疾跑（不消耗饥饿值）、强制疾跑、疾跑+潜行同时触发。
+
+**服务端检测核心**：速度向量 vs 疾跑状态的矛盾。服务端追踪每个移动包的位移向量和水平速度，对比 `PlayerActionEvent`（StartSprinting=9 / StopSprinting=10）和实际速度。
+
 ```java
 // Sprint Hack 检测（服务端 sprint 状态 vs 客户端 sprint 状态）
 boolean serverSprinting = player.isSprinting();
@@ -123,9 +129,15 @@ if (data.moveSprinting != serverSprinting) {
     flag(player, "SprintHack", serverSprinting, data.moveSprinting);
 }
 
-// NoSlowDown 检测（输入向量 vs 实际速度）
-// 正常潜行/使用物品时速度会降低
-// 如果输入向量很大但速度也很大 → 可能 no-slowdown
+// 全向疾跑检测（inputVec 方向 vs 位移方向）
+// 正常疾跑只能向前，如果 inputVec 是侧/后方向但速度 = 疾跑速度 → 异常
+double speed = calculateHorizontalSpeed(player);
+double inputForward = data.moveInputY;  // inputVec 第二项 = 向前大小
+boolean movingForward = inputForward > 0.5;
+if (serverSprinting && !movingForward && speed > 4.5) {
+    // 疾跑状态但没向前推轮盘 → 全向疾跑 hack
+    flag(player, "SprintHack-Omni", speed, inputForward);
+}
 ```
 
 > ⚠️ **FapModMain 自动疾跑兼容性**：FAPIXEL 服务器的 FapModMain MOD 有自动疾跑功能（按键切换，
@@ -133,9 +145,69 @@ if (data.moveSprinting != serverSprinting) {
 > 客户端 `isSprinting()` 和服务端 `player.isSprinting()` 始终一致，**不会触发此检测**。
 > 此检测只能抓到绕过引擎直接伪造 sprint 状态的外挂。
 
+### NoSlowDown 检测
+
+**作弊变种**：进食/拉弓/举盾/潜行时不减速，保持正常移动速度。
+
+**服务端检测核心**：位移速度 vs 当前活动状态的矛盾。原版中进食/拉弓/举盾时移动速度降为 ~35%，潜行降为 ~30%。
+
+```java
+// 潜行不减速检测
+double speed = calculateHorizontalSpeed(player);
+if (data.moveSneaking) {
+    double expectedMax = baseSpeed * 0.3 * tolerance;
+    if (speed > expectedMax) {
+        flag(player, "NoSlowDown-Sneak", speed, expectedMax);
+    }
+}
+```
+
+**⚠️ 当前缺口**：是否正在使用物品（拉弓/进食/举盾）。FapACH 暂未采集 `usingItem` 状态。
+ModSDK 有 `ClientItemTryUseEvent`（右键使用物品）和 `ItemReleaseUsingClientEvent`（释放物品）事件可监听。
+补充此状态后，服务端可做：
+```java
+// 使用物品不减速检测（需 FapACH 补充 usingItem 字段后）
+if (data.usingItem && speed > baseSpeed * 0.35 * tolerance) {
+    flag(player, "NoSlowDown-Item", speed, expectedSlowedSpeed);
+}
+```
+
+### Fly / Survival Fly 检测（降低误判）
+
+**服务端检测**：Y 轴速度、滞空时间、Y 变化模式、落地包验证（多维度交叉）。
+
+**FapACH 核心价值**：排除合法场景，降低误判率。
+
+```java
+// 服务端怀疑飞行（Y 异常）时，查 FapACH 数据排除合法场景
+if (疑似飞行(player)) {
+    if (data.moveGliding) {
+        // 鞘翅飞行 → 合法，排除
+        return;
+    }
+    if (data.moveOnLadder) {
+        // 在梯子上 → 合法，排除
+        return;
+    }
+    if (data.moveInWater) {
+        // 在水中（浮力）→ 合法，排除
+        return;
+    }
+    // 没有任何合法理由 → 确认 Fly
+    flag(player, "SurvivalFly");
+}
+```
+
+### Speed 检测
+
+**服务端检测**：每个 tick 计算水平位移速度，与当前状态的合法上限对比（疾跑 ×1.3、速度药水 ×1.2、飞行 ×2.0 等），留 10% 容差。
+
+**FapACH 补充**：`inputVec` 方向与位移方向交叉验证，`sprint` 状态确认疾跑合法性。
+
 ### 预留位置
 - VenusAntiCheat 的 Moving 检测模块中
 - 在移动事件回调里查询客户端报告的状态进行交叉验证
+- 详见 FapAntiCheatHelper README 的「[移动类作弊检测方法论](https://github.com/FunnyArenaPixel/FapAntiCheatHelper#移动类作弊检测方法论)」章节
 
 ---
 

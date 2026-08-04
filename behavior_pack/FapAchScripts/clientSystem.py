@@ -3,12 +3,15 @@
 FapACH 客户端主系统
 
 负责：
-  1. 初始化三个采集模块（CPS / 准星 / 移动）
+  1. 初始化采集模块（CPS / 准星 / 移动 / 方块）
   2. 注册引擎事件监听
   3. OnScriptTickClient 定时调度
   4. 接收服务端配置同步（ConfigSync）
-  5. 统一封装 NotifyToServer 数据上报
+  5. FOV 异常监控
+  6. 统一封装 NotifyToServer 数据上报
 """
+
+import time
 
 import mod.client.extraClientApi as clientApi
 
@@ -16,6 +19,9 @@ from FapAchScripts import modConfig
 from FapAchScripts.cpsCollector import CpsCollector
 from FapAchScripts.aimCollector import AimCollector
 from FapAchScripts.moveCollector import MoveCollector
+from FapAchScripts.blockCollector import BlockCollector
+
+_MOD_VERSION = '0.0.3'
 
 
 class FapAchClient(clientApi.GetClientSystemCls()):
@@ -23,7 +29,6 @@ class FapAchClient(clientApi.GetClientSystemCls()):
     def __init__(self, namespace, systemName):
         super(FapAchClient, self).__init__(namespace, systemName)
 
-        # 引擎 ID
         self._playerId = clientApi.GetLocalPlayerId()
         self._levelId = clientApi.GetLevelId()
 
@@ -31,22 +36,28 @@ class FapAchClient(clientApi.GetClientSystemCls()):
         self._enableCps = modConfig.ENABLE_CPS
         self._enableAim = modConfig.ENABLE_AIM
         self._enableMove = modConfig.ENABLE_MOVE
+        self._enableBlock = modConfig.ENABLE_BLOCK
 
         # 采集器
         self._cps = CpsCollector()
         self._aim = AimCollector()
         self._move = MoveCollector()
+        self._block = BlockCollector()
 
         # 客户端就绪标志
         self._readyNotified = False
 
-        # 输入模式检测（用于准星检测的触屏兼容性）
-        # InputMode: 0=Mouse, 1=Touch, 2=GamePad, None=未知
+        # 输入模式检测
         self._inputMode = None
         self._splitControls = None
         self._inputCheckTick = 0
-        # __init__ 时 GetLocalPlayerId() 可能返回 -1，OnUiInitFinished 中重新创建
         self._compPlayerView = clientApi.GetEngineCompFactory().CreatePlayerView(self._playerId)
+
+        # FOV 监控
+        self._fovCheckTick = 0
+        self._fovCheckTicks = int(modConfig.FOV_CHECK_INTERVAL * 30)
+        self._lastFov = 0.0
+        self._compCamera = clientApi.GetEngineCompFactory().CreateCamera(self._levelId)
 
         self._listenEvents()
 
@@ -58,31 +69,27 @@ class FapAchClient(clientApi.GetClientSystemCls()):
     # ==========================================================
 
     def _listenEvents(self):
-        # 引擎事件
         ns = clientApi.GetEngineNamespace()
         sys = clientApi.GetEngineSystemName()
 
-        # UI 初始化完成（获取有效 playerId）
         self.ListenForEvent(ns, sys, 'UiInitFinished', self, self._onUiInitFinished)
-
-        # 脚本刻（定时调度）
         self.ListenForEvent(ns, sys, 'OnScriptTickClient', self, self._onTick)
 
-        # CPS — 左键点击
         if self._enableCps:
             self.ListenForEvent(ns, sys, 'LeftClickBeforeClientEvent', self, self._onLeftClick)
 
-        # 准星 — 攻击实体
         if self._enableAim:
             self.ListenForEvent(ns, sys, 'PlayerAttackEntityEvent', self, self._onAttackEntity)
 
-        # 移动 — 物品使用状态（NoSlowDown 检测）
         if self._enableMove:
             self.ListenForEvent(ns, sys, 'ClientItemTryUseEvent', self, self._onItemTryUse)
             self.ListenForEvent(ns, sys, 'ItemReleaseUsingClientEvent', self, self._onItemReleaseUsing)
             self.ListenForEvent(ns, sys, 'OnCarriedNewItemChangedClientEvent', self, self._onCarriedItemChanged)
+            self.ListenForEvent(ns, sys, 'OnLocalPlayerActionClientEvent', self, self._onPlayerAction)
 
-        # 配置同步（服务端 → 客户端）
+        if self._enableBlock:
+            self.ListenForEvent(ns, sys, 'StartDestroyBlockClientEvent', self, self._onStartDestroyBlock)
+
         self.ListenForEvent(
             modConfig.mod_name, modConfig.server_system_name,
             modConfig.EVENT_CONFIG_SYNC,
@@ -94,77 +101,83 @@ class FapAchClient(clientApi.GetClientSystemCls()):
     # ==========================================================
 
     def _onUiInitFinished(self, args):
-        """UI 初始化完成，获取有效 playerId 并绑定采集器。"""
         self._playerId = clientApi.GetLocalPlayerId()
         self._levelId = clientApi.GetLevelId()
 
-        # 重新创建 PlayerView 组件（此时 playerId 有效）
         self._compPlayerView = clientApi.GetEngineCompFactory().CreatePlayerView(self._playerId)
+        self._compCamera = clientApi.GetEngineCompFactory().CreateCamera(self._levelId)
 
         # 绑定采集器
-        self._aim.bind(self._levelId)
+        self._aim.bind(self._levelId, self._playerId)
         self._move.bind(self._playerId)
+        self._block.bind(self._playerId)
 
-        # 立即检测一次输入模式
         self._checkInputMode()
 
-        # 通知服务端客户端就绪
         if not self._readyNotified:
             self._readyNotified = True
             self.NotifyToServer(modConfig.EVENT_CLIENT_READY, {
                 'playerId': str(self._playerId),
-                'version': '0.0.1',
+                'version': _MOD_VERSION,
                 'modules': {
-                    'cps':  'true' if self._enableCps else 'false',
-                    'aim':  'true' if self._enableAim else 'false',
-                    'move': 'true' if self._enableMove else 'false',
+                    'cps':   'true' if self._enableCps else 'false',
+                    'aim':   'true' if self._enableAim else 'false',
+                    'move':  'true' if self._enableMove else 'false',
+                    'block': 'true' if self._enableBlock else 'false',
                 }
             })
-            print('[FapACH] Client ready notified to server')
+            print('[FapACH] Client ready notified to server (v%s)' % _MOD_VERSION)
 
     def _onTick(self, args):
-        """脚本刻回调（每秒 30 次）。"""
-        # 输入模式检测（每秒一次 = 每 30 tick）
+        # 输入模式检测（每秒一次）
         self._inputCheckTick += 1
         if self._inputCheckTick >= 30:
             self._inputCheckTick = 0
             self._checkInputMode()
 
+        # FOV 监控（每 10 秒）
+        self._fovCheckTick += 1
+        if self._fovCheckTick >= self._fovCheckTicks:
+            self._fovCheckTick = 0
+            self._checkFov()
+
         if self._enableCps:
             self._cps.onTick(self)
         if self._enableMove:
             self._move.onTick(self)
+        if self._enableBlock:
+            self._block.onTick(self)
 
     def _onLeftClick(self, args):
-        """左键点击事件 — CPS 采集。"""
         self._cps.recordClick()
 
     def _onAttackEntity(self, args):
-        """攻击实体事件 — 准星目标采集。"""
         self._aim.onAttackEntity(self, args)
 
     def _onItemTryUse(self, args):
-        """右键使用物品 — 标记 usingItem 状态。"""
         self._move.setUsingItem(True)
 
     def _onItemReleaseUsing(self, args):
-        """释放使用中的物品 — 清除 usingItem 状态。"""
         self._move.setUsingItem(False)
 
     def _onCarriedItemChanged(self, args):
-        """切换主手物品 — 使用物品被打断，重置 usingItem。"""
         self._move.setUsingItem(False)
 
+    def _onPlayerAction(self, args):
+        """玩家动作事件 — 记录状态转换（疾跑/潜行/飞行/游泳等）。"""
+        actionType = args.get('actionType', -1)
+        if actionType >= 0:
+            self._move.setLastAction(actionType)
+
+    def _onStartDestroyBlock(self, args):
+        """开始挖方块 — 方块破坏时序采集。"""
+        self._block.onStartDestroy(self, args)
+
     # ==========================================================
-    # 输入模式检测（准星检测的触屏兼容性）
+    # 输入模式检测
     # ==========================================================
 
     def _checkInputMode(self):
-        """
-        检测当前输入模式和分离控制开关。
-        触屏默认模式（非分离控制）下，玩家直接点击屏幕上的实体来攻击，
-        屏幕中心准星不一定指向被攻击的实体，准星检测不适用。
-        """
         if not self._compPlayerView:
             return
         try:
@@ -180,20 +193,45 @@ class FapAchClient(clientApi.GetClientSystemCls()):
             print('[FapACH] _checkInputMode error: %s' % e)
 
     # ==========================================================
+    # FOV 监控
+    # ==========================================================
+
+    def _checkFov(self):
+        """
+        定期检查 FOV 值。仅当超出正常范围时上报。
+
+        ⚠️ 误判注意：
+          - 部分玩家合法使用较高 FOV（如 90-110）
+          - 某些显卡驱动 / 显示设置可能导致 FOV 读数偏差
+          - FOV 异常是弱证据，不能单独作为判定依据
+          - 仅上报异常值，服务端应结合其他指标综合分析
+        """
+        if not self._compCamera:
+            return
+        try:
+            fov = self._compCamera.GetFov()
+            if fov is None:
+                return
+            fov = float(fov)
+            # 只在超出正常范围或与上次变化超过 20° 时上报
+            abnormal = (fov < modConfig.FOV_NORMAL_MIN or fov > modConfig.FOV_NORMAL_MAX)
+            bigChange = abs(fov - self._lastFov) > 20.0
+            if abnormal or bigChange:
+                self._lastFov = fov
+                self.sendReport(modConfig.EVENT_MOVE_REPORT, {
+                    'fovAlert': round(fov, 1),
+                    'timestamp': round(time.time() * 1000),
+                    'samples': [],
+                    'count': 0,
+                })
+        except:
+            pass
+
+    # ==========================================================
     # 配置同步回调
     # ==========================================================
 
     def _onConfigSync(self, args):
-        """
-        接收服务端配置同步。
-
-        可选字段：
-            enableCps / enableAim / enableMove — 模块开关 ('true'/'false')
-            cpsReportInterval   — CPS 上报间隔（秒）
-            aimCooldown         — 准星上报冷却（秒）
-            moveSampleInterval  — 移动采样间隔（秒）
-            moveReportInterval  — 移动上报间隔（秒）
-        """
         try:
             if 'enableCps' in args:
                 self._enableCps = (args['enableCps'] == 'true')
@@ -201,6 +239,8 @@ class FapAchClient(clientApi.GetClientSystemCls()):
                 self._enableAim = (args['enableAim'] == 'true')
             if 'enableMove' in args:
                 self._enableMove = (args['enableMove'] == 'true')
+            if 'enableBlock' in args:
+                self._enableBlock = (args['enableBlock'] == 'true')
             if 'cpsReportInterval' in args:
                 self._cps.setReportInterval(args['cpsReportInterval'])
             if 'aimCooldown' in args:
@@ -209,20 +249,18 @@ class FapAchClient(clientApi.GetClientSystemCls()):
                 self._move.setSampleInterval(args['moveSampleInterval'])
             if 'moveReportInterval' in args:
                 self._move.setReportInterval(args['moveReportInterval'])
+            if 'blockReportCooldown' in args:
+                self._block.setCooldown(args['blockReportCooldown'])
             print('[FapACH] ConfigSync received: %s' % args)
         except Exception as e:
             print('[FapACH] ConfigSync error: %s' % e)
 
     # ==========================================================
-    # 数据上报（各采集器调用此方法）
+    # 数据上报
     # ==========================================================
 
     def sendReport(self, eventName, data):
-        """
-        统一封装 NotifyToServer，附加 playerId。
-        """
         if not self._playerId or self._playerId == -1:
-            # playerId 尚未就绪，跳过
             return
         data['playerId'] = str(self._playerId)
         try:
@@ -243,6 +281,13 @@ class FapAchClient(clientApi.GetClientSystemCls()):
             self.UnListenForEvent(ns, sys, 'LeftClickBeforeClientEvent', self, self._onLeftClick)
         if self._enableAim:
             self.UnListenForEvent(ns, sys, 'PlayerAttackEntityEvent', self, self._onAttackEntity)
+        if self._enableMove:
+            self.UnListenForEvent(ns, sys, 'ClientItemTryUseEvent', self, self._onItemTryUse)
+            self.UnListenForEvent(ns, sys, 'ItemReleaseUsingClientEvent', self, self._onItemReleaseUsing)
+            self.UnListenForEvent(ns, sys, 'OnCarriedNewItemChangedClientEvent', self, self._onCarriedItemChanged)
+            self.UnListenForEvent(ns, sys, 'OnLocalPlayerActionClientEvent', self, self._onPlayerAction)
+        if self._enableBlock:
+            self.UnListenForEvent(ns, sys, 'StartDestroyBlockClientEvent', self, self._onStartDestroyBlock)
         self.UnListenForEvent(
             modConfig.mod_name, modConfig.server_system_name,
             modConfig.EVENT_CONFIG_SYNC,

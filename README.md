@@ -12,6 +12,7 @@
 
 - [核心原理](#核心原理)
 - [已实现的功能](#已实现的功能)
+- [移动类作弊检测方法论](#移动类作弊检测方法论)
 - [使用的技术和 ModSDK 接口](#使用的技术和-modsdk-接口)
 - [项目结构](#项目结构)
 - [PyRpc 通信协议](#pyrpc-通信协议)
@@ -191,6 +192,267 @@ SprintHack 检测：
 NoSlowDown 检测：
   inputVec 幅度大（玩家在推摇杆），但实际速度不降 → 可能在使用物品/潜行时不减速
 ```
+
+> 📖 移动类作弊的详细检测原理见下方 [移动类作弊检测方法论](#移动类作弊检测方法论) 章节。
+
+---
+
+## 移动类作弊检测方法论
+
+> 本章节详细说明移动相关的各种作弊类型的检测原理，以及 FapACH 客户端数据在其中的具体作用。
+
+### 检测架构：三层防线
+
+```
+第一层：Nukkit-MOT 引擎服务端权威移动
+├── 引擎内置位置验证，超出物理预期就橡皮筋回拉
+├── 能抓：最基础的飞行、穿墙、超速
+└── 抓不了：绕过引擎逻辑的状态篡改
+
+第二层：VenusAntiCheat 服务端启发式（主力）
+├── 在引擎之上做统计分析：位移/秒、包频率、状态转移合法性
+├── 能抓：速度异常、飞行、sprint 状态矛盾
+└── 困难：看不清客户端真实输入和引擎状态
+
+第三层：FapACH 客户端辅助数据（本 MOD）
+├── 提供服务端拿不到的数据：输入向量、引擎状态、环境信息
+├── 用途：降误判（排除合法场景）+ 增精度（补充新维度）
+└── 约束：客户端代码可被破解，数据只能做辅助参考
+```
+
+---
+
+### Sprint Hack（疾跑作弊）
+
+#### 作弊者做什么
+
+| 变种 | 原版限制 | 外挂绕过方式 |
+|------|----------|-------------|
+| 全向疾跑 | 只能向前疾跑 | 任意方向都享受疾跑速度 |
+| 无声疾跑 | 疾跑额外消耗饥饿值 | 不消耗饥饿值 |
+| 强制疾跑 | 需双击或按键触发 | 强制锁定疾跑状态 |
+| 疾跑+潜行 | 潜行时不能疾跑 | 同时触发两种状态 |
+
+#### 服务端检测原理
+
+**核心：速度向量 vs 疾跑状态的矛盾**
+
+```
+正常玩家：
+  移动方向 = 前方 → 疾跑速度 ≈ 5.6 格/秒
+  移动方向 = 侧/后 → 非疾跑速度 ≈ 4.3 格/秒
+
+SprintHack（全向疾跑）：
+  玩家向侧面/后方移动，但速度 = 疾跑速度（5.6）
+  → 方向和速度不匹配 → 异常
+```
+
+服务端追踪每个移动包的位移向量和水平速度，对比 `PlayerActionEvent`（StartSprinting=9 / StopSprinting=10）和实际速度。
+
+#### FapACH 能补充什么
+
+```
+场景：服务端看到玩家在疾跑速度移动，但 PlayerActionEvent 中没有 StartSprinting
+
+没有 FapACH：服务端只能怀疑是 sprint hack（但也可能是网络丢包导致的状态包丢失）
+
+有 FapACH：
+  inputVec = (0.0, 0.87)   ← 玩家确实推轮盘向前了
+  sprint   = true           ← 引擎确认确实在疾跑
+  → 引擎层面的真实疾跑，非状态包伪造
+  → 进一步查 inputVec 方向是否合法（是否向前）
+```
+
+#### ⚠️ FapModMain 自动疾跑兼容性
+
+FAPIXEL 服务器的 FapModMain MOD 有自动疾跑功能（按键切换，按前进键自动触发疾跑）。
+该功能通过引擎 API `BeginSprinting()` 实现，走的是**原版疾跑逻辑**：
+
+- 客户端 `isSprinting()` → `true`
+- 服务端 `player.isSprinting()` → `true`
+- 两端始终一致，**不会触发 SprintHack 检测**
+
+自动疾跑改变的是「怎么触发」疾跑（一键 vs 双击），但触发后引擎对两端报告的是同一个状态。只有绕过引擎直接伪造 sprint 状态的外挂才会造成两端不一致。
+
+---
+
+### NoSlowDown（不减速作弊）
+
+#### 作弊者做什么
+
+原版 MC 中，以下行为会**减速到正常的 ~35%**：
+
+| 行为 | 正常减速 | NoSlowDown 绕过 |
+|------|----------|-----------------|
+| 进食/喝药水 | 移动速度 ×0.35 | 保持正常速度 |
+| 拉弓（弓/三叉戟） | 移动速度 ×0.35 | 保持正常速度 |
+| 举盾格挡 | 移动速度 ×0.35 | 保持正常速度 |
+| 潜行 | 移动速度 ×0.3 | 保持正常速度 |
+| 在灵魂沙/蛛网上 | 移动速度 ×0.4 | 保持正常速度 |
+
+#### 服务端检测原理
+
+**核心：位移速度 vs 当前活动状态的矛盾**
+
+```java
+// VenusAntiCheat 检测逻辑（简化）
+double speed = calculateHorizontalSpeed(player);
+
+if (player.isSneaking()) {
+    double expectedMax = baseSpeed * 0.3;
+    if (speed > expectedMax * tolerance) {
+        flag(player, "NoSlowDown");
+    }
+}
+// 潜行状态 → 期望速度降低，实际速度没降 → 异常
+```
+
+**服务端困难点**：Nukkit-MOT 能通过数据包推断玩家是否「正在使用物品」，但精度有限、有延迟。
+
+#### FapACH 当前数据 vs 缺口
+
+**已采集**：`sprint` / `sneak` / `inWater` / `onLadder` / `gliding` — 可检测潜行不减速、水中异常速度等。
+
+**⚠️ 缺口**：是否正在使用物品（拉弓/进食/举盾）。
+
+ModSDK 没有直接的 `isUsingItem()` 查询接口，但有相关事件可监听：
+
+| 事件 | 用途 |
+|------|------|
+| `ClientItemTryUseEvent` | 玩家右键尝试使用物品时触发 |
+| `ItemReleaseUsingClientEvent` | 释放使用中的物品时触发 |
+
+> 补充 `usingItem` 状态采集是 FapACH 的一个待办改进点。加上之后 NoSlowDown 检测链路就完整了。
+
+---
+
+### Fly / Survival Fly（飞行作弊）
+
+#### 作弊者做什么
+
+| 变种 | 原理 | 检测难度 |
+|------|------|----------|
+| Vanilla Fly | 直接修改 Y 轴位置，无视重力 | 最基础，引擎层可抓 |
+| Jetpack | 每帧给微小向上速度 | 较隐蔽，需持续监控 |
+| AirJump | 空中再次跳跃 | 类似二段跳 |
+| Glide | 降低下落速度，模拟鞘翅 | 最难抓 |
+| NoFall | 伪造落地包取消掉落伤害 | 不影响位置，只影响伤害 |
+
+#### 服务端检测原理（多维度交叉）
+
+**维度 1：Y 轴速度**
+
+```
+正常：空中时 Y 速度持续下降（受重力约束）
+异常：Y 速度 > 0 且不在跳跃/鞘翅/漂浮/骑乘状态 → 飞行
+```
+
+**维度 2：滞空时间**
+
+```java
+if (airTime > maxAirTimeForJumpHeight &&
+    !player.isGliding() &&
+    !hasEffect(LEVITATION)) {
+    flag(player, "SurvivalFly", airTime);
+}
+```
+
+**维度 3：连续 Y 变化模式**
+
+```
+正常跳跃：↑↑↑（递减上升）→ 顶点 → ↓↓↓（加速下落）
+Fly：↑↑↑↑↑（持续上升）或 →→→（水平悬停）
+```
+
+**维度 4：落地包验证（NoFall）**
+
+```
+正常：落地时发送正确 fallDistance，引擎据此计算伤害
+NoFall：发送 fallDistance=0 或取消落地事件
+检测：服务端自己追踪 Y 轴下落距离，与客户端声称的对比
+```
+
+#### FapACH 能补充什么
+
+**核心价值：降低误判**
+
+服务端怀疑飞行时，FapACH 的数据可以排除合法场景：
+
+```
+场景 1：服务端看到 Y 持续上升 → 怀疑 Fly
+  FapACH：gliding=true（鞘翅飞行中）→ 合法，排除 ✅
+
+场景 2：服务端看到空中停留很久 → 怀疑 Fly
+  FapACH：onLadder=true（在梯子上）→ 合法，排除 ✅
+
+场景 3：服务端看到缓慢下落 → 怀疑 Glide
+  FapACH：inWater=true（在水中）→ 水的浮力，合法，排除 ✅
+
+场景 4：服务端看到 Y 上升 → 怀疑 Fly
+  FapACH：gliding=false, onLadder=false, inWater=false
+  → 没有任何合法理由 → 确认 Fly ❌
+```
+
+当前 FapACH 已采集所有需要的环境状态（`inWater`/`onLadder`/`gliding`），对 Fly 检测的误判降低非常有价值。
+
+---
+
+### Speed（超速）
+
+#### 作弊者做什么
+
+直接修改移动速度倍率，让角色移动速度超过合法上限。
+
+#### 服务端检测原理
+
+```java
+// 每个 tick 计算
+double horizontalSpeed = Math.sqrt(dx*dx + dz*dz) / deltaTime;
+
+// 计算合法最大速度
+double maxSpeed = baseSpeed;         // ≈ 4.3 格/秒
+if (player.isSprinting()) maxSpeed *= 1.3;  // ≈ 5.6
+if (hasSpeedEffect)       maxSpeed *= 1.0 + 0.2 * amplifier;
+if (player.isFlying())    maxSpeed *= 2.0;
+maxSpeed *= 1.1;  // 10% 容差（防网络延迟误判）
+
+if (horizontalSpeed > maxSpeed) {
+    flag(player, "Speed");
+}
+```
+
+#### FapACH 能补充什么
+
+```
+服务端计算：实际速度 = 7.2 格/秒（超过 sprint 上限 5.6）
+FapACH 上报：inputVec = (0.0, 1.0)  ← 满力向前
+              sprint = true
+              → inputVec 方向 = 位移方向（没有推力篡改）
+              → sprint = true（疾跑速度合法）
+              → 但实际速度 > 疾跑上限 → 外挂修改了移动倍率
+```
+
+---
+
+### 其他移动作弊
+
+| 作弊 | 原理 | 服务端检测 | FapACH 补充 |
+|------|------|------------|-------------|
+| Step（自动上台阶） | 不跳跃直接走上 1 格高方块 | Y 突变 + 无跳跃事件 | `OnLocalPlayerStartJumpClientEvent` 验证是否真的跳了 |
+| Spider（爬墙） | 沿垂直墙壁上升 | Y 增加 + 接触墙壁 + 非 `onLadder` | `onLadder=false` 确认不在梯子上 |
+| Jesus（水上行走） | 在水面不下沉 | Y 在水面 + 非 `inWater` + 非 `isSwimming` | `inWater=false` 确认不在水中 |
+
+---
+
+### 客户端 vs 服务端分工总结
+
+| 检测项 | 服务端独自 | + FapACH 辅助 |
+|--------|-----------|---------------|
+| 基础 Fly / Speed | ✅ 能抓 | 降误判（排除合法场景） |
+| SprintHack（方向矛盾） | ⚠️ 间接推断 | ⭐ `inputVec` 提供方向数据 |
+| NoSlowDown | ⚠️ 精度低 | ⭐ 需补充 `usingItem` 状态后大幅提升 |
+| Glide 误判排除 | ⚠️ 经常误判 | ⭐ `inWater`/`onLadder`/`gliding` 排除合法场景 |
+| NoFall | ⚠️ 依赖落地包 | ⚠️ 客户端可伪造落地距离 |
 
 ---
 
@@ -507,6 +769,7 @@ if (data != null) {
 | 版本 | 日期 | 变更 |
 |------|------|------|
 | v0.0.1 | 2026-08-04 | 初始版本：CPS 模式分析 + 准星目标上报 + 移动状态交叉验证 + 配置同步 |
+| v0.0.1 (文档) | 2026-08-04 | README 新增移动类作弊检测方法论章节（Sprint Hack / NoSlowDown / Fly / Speed 详解） |
 
 ---
 

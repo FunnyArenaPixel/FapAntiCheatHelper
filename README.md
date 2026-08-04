@@ -180,6 +180,7 @@ KillAura：victimId != pickEntityId → match=false（攻击了准星没瞄准�
 | `inWater` | `PlayerCompClient.isInWater()` | 水中状态（速度计算） |
 | `onLadder` | `PlayerCompClient.IsOnLadder()` | 梯子上（速度计算） |
 | `gliding` | `PlayerCompClient.isGliding()` | 鞘翅飞行 |
+| `usingItem` | `ClientItemTryUseEvent` / `ItemReleaseUsingClientEvent` | 物品使用状态（反 NoSlowDown） |
 
 **采样频率**：每 0.5 秒采样一次，每 2 秒上报一批（最多 8 条）
 
@@ -309,20 +310,33 @@ if (player.isSneaking()) {
 
 **服务端困难点**：Nukkit-MOT 能通过数据包推断玩家是否「正在使用物品」，但精度有限、有延迟。
 
-#### FapACH 当前数据 vs 缺口
+#### FapACH 采集
 
-**已采集**：`sprint` / `sneak` / `inWater` / `onLadder` / `gliding` — 可检测潜行不减速、水中异常速度等。
+**已采集**：`sprint` / `sneak` / `inWater` / `onLadder` / `gliding` / **`usingItem`**
 
-**⚠️ 缺口**：是否正在使用物品（拉弓/进食/举盾）。
+`usingItem` 状态通过以下事件追踪：
+- `ClientItemTryUseEvent`（右键使用物品）→ `usingItem = true`
+- `ItemReleaseUsingClientEvent`（释放物品）→ `usingItem = false`
+- `OnCarriedNewItemChangedClientEvent`（切换主手物品）→ `usingItem = false`（使用被打断）
+- 超时自动重置（5 秒，防止瞬间使用物品不触发释放事件导致卡在 true）
 
-ModSDK 没有直接的 `isUsingItem()` 查询接口，但有相关事件可监听：
-
-| 事件 | 用途 |
-|------|------|
-| `ClientItemTryUseEvent` | 玩家右键尝试使用物品时触发 |
-| `ItemReleaseUsingClientEvent` | 释放使用中的物品时触发 |
-
-> 补充 `usingItem` 状态采集是 FapACH 的一个待办改进点。加上之后 NoSlowDown 检测链路就完整了。
+服务端 NoSlowDown 检测逻辑：
+```java
+// 使用物品不减速检测
+if (data.moveUsingItem) {
+    double expectedMax = baseSpeed * 0.35 * tolerance;
+    if (actualSpeed > expectedMax) {
+        flag(player, "NoSlowDown-Item", actualSpeed, expectedMax);
+    }
+}
+// 潜行不减速检测
+if (data.moveSneaking) {
+    double expectedMax = baseSpeed * 0.3 * tolerance;
+    if (actualSpeed > expectedMax) {
+        flag(player, "NoSlowDown-Sneak", actualSpeed, expectedMax);
+    }
+}
+```
 
 ---
 
@@ -490,6 +504,9 @@ FapACH 上报：inputVec = (0.0, 1.0)  ← 满力向前
 |------|------|------|
 | `LeftClickBeforeClientEvent` | 引擎→客户端 | 攻击键按下，CPS 采集的触发点 |
 | `PlayerAttackEntityEvent` | 引擎→客户端 | 本地玩家攻击实体，准星采集的触发点 |
+| `ClientItemTryUseEvent` | 引擎→客户端 | 右键使用物品，标记 usingItem 状态 |
+| `ItemReleaseUsingClientEvent` | 引擎→客户端 | 释放使用中的物品，清除 usingItem 状态 |
+| `OnCarriedNewItemChangedClientEvent` | 引擎→客户端 | 切换主手物品，重置 usingItem |
 | `OnScriptTickClient` | 引擎→客户端 | 脚本刻（每秒 30 次），定时调度 |
 | `UiInitFinished` | 引擎→客户端 | UI 初始化完成，获取有效 playerId |
 

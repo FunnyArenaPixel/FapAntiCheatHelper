@@ -19,6 +19,12 @@ from FapAchScripts import modConfig
 
 _compFactory = clientApi.GetEngineCompFactory()
 
+# usingItem 超时自动重置（秒）
+# 瞬间使用物品（如扔药水）只触发 ClientItemTryUseEvent 不触发 ItemReleaseUsingClientEvent，
+# 会导致 usingItem 卡在 true。超时后自动重置。
+# 正常进食 ≈ 1.6s，拉弓最长蓄力 ≈ 3s，留 5s 余量。
+_USING_ITEM_TIMEOUT = 5.0
+
 
 class MoveCollector(object):
 
@@ -38,6 +44,11 @@ class MoveCollector(object):
         self._sampleCount = 0
         self._reportCount = 0
 
+        # 物品使用状态追踪
+        # ClientItemTryUseEvent → True，ItemReleaseUsingClientEvent → False
+        self._usingItem = False
+        self._usingItemStartTime = 0.0
+
         # 采样缓冲区
         self._buffer = []
 
@@ -55,6 +66,12 @@ class MoveCollector(object):
 
     def setReportInterval(self, seconds):
         self._reportTicks = max(1, int(float(seconds) * 30))
+
+    def setUsingItem(self, using):
+        """由 clientSystem 在物品使用事件中调用。"""
+        self._usingItem = using
+        if using:
+            self._usingItemStartTime = time.time()
 
     # ----------------------------------------------------------
     # 公开方法
@@ -95,6 +112,10 @@ class MoveCollector(object):
             isOnLadder = self._compPlayer.IsOnLadder()
             isGliding = self._compPlayer.isGliding()
 
+            # 物品使用状态（含超时自动重置）
+            if self._usingItem and (time.time() - self._usingItemStartTime > _USING_ITEM_TIMEOUT):
+                self._usingItem = False
+
             sample = {
                 't':           round(time.time() * 1000),  # 毫秒时间戳
                 'pos':         [round(pos[0], 3), round(pos[1], 3), round(pos[2], 3)],
@@ -106,6 +127,7 @@ class MoveCollector(object):
                 'inWater':     'true' if isInWater else 'false',
                 'onLadder':    'true' if isOnLadder else 'false',
                 'gliding':     'true' if isGliding else 'false',
+                'usingItem':   'true' if self._usingItem else 'false',
             }
             self._buffer.append(sample)
             # 限制缓冲区大小

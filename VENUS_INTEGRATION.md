@@ -113,6 +113,7 @@ if (data.aimApplicableAttacks > 10) {
 | `data.moveInWater` | boolean | 客户端是否在水中 |
 | `data.moveOnLadder` | boolean | 客户端是否在梯子上 |
 | `data.moveGliding` | boolean | 客户端是否鞘翅飞行 |
+| `data.moveUsingItem` | boolean | 客户端是否正在使用物品（NoSlowDown 检测） |
 | `data.moveInputX/Y` | double | 移动轮盘输入向量（方向，非速度） |
 
 ### Sprint Hack 检测
@@ -152,25 +153,24 @@ if (serverSprinting && !movingForward && speed > 4.5) {
 **服务端检测核心**：位移速度 vs 当前活动状态的矛盾。原版中进食/拉弓/举盾时移动速度降为 ~35%，潜行降为 ~30%。
 
 ```java
-// 潜行不减速检测
 double speed = calculateHorizontalSpeed(player);
-if (data.moveSneaking) {
-    double expectedMax = baseSpeed * 0.3 * tolerance;
-    if (speed > expectedMax) {
-        flag(player, "NoSlowDown-Sneak", speed, expectedMax);
-    }
+
+// 使用物品不减速检测（FapACH v0.0.2+ 已采集 usingItem）
+if (data.moveUsingItem && speed > baseSpeed * 0.35 * tolerance) {
+    flag(player, "NoSlowDown-Item", speed, baseSpeed * 0.35);
+}
+
+// 潜行不减速检测
+if (data.moveSneaking && speed > baseSpeed * 0.3 * tolerance) {
+    flag(player, "NoSlowDown-Sneak", speed, baseSpeed * 0.3);
 }
 ```
 
-**⚠️ 当前缺口**：是否正在使用物品（拉弓/进食/举盾）。FapACH 暂未采集 `usingItem` 状态。
-ModSDK 有 `ClientItemTryUseEvent`（右键使用物品）和 `ItemReleaseUsingClientEvent`（释放物品）事件可监听。
-补充此状态后，服务端可做：
-```java
-// 使用物品不减速检测（需 FapACH 补充 usingItem 字段后）
-if (data.usingItem && speed > baseSpeed * 0.35 * tolerance) {
-    flag(player, "NoSlowDown-Item", speed, expectedSlowedSpeed);
-}
-```
+**`usingItem` 状态采集原理**：
+- 客户端通过 `ClientItemTryUseEvent`（右键使用物品）→ 标记 `usingItem=true`
+- `ItemReleaseUsingClientEvent`（释放物品）→ 标记 `usingItem=false`
+- `OnCarriedNewItemChangedClientEvent`（切换物品）→ 重置为 false
+- 超时自动重置（5 秒，防止瞬间使用物品如扔药水不触发释放事件导致卡在 true）
 
 ### Fly / Survival Fly 检测（降低误判）
 

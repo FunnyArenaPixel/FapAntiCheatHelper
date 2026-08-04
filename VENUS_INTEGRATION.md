@@ -128,6 +128,11 @@ if (data.moveSprinting != serverSprinting) {
 // 如果输入向量很大但速度也很大 → 可能 no-slowdown
 ```
 
+> ⚠️ **FapModMain 自动疾跑兼容性**：FAPIXEL 服务器的 FapModMain MOD 有自动疾跑功能（按键切换，
+> 按前进键自动触发疾跑）。该功能通过引擎 API `BeginSprinting()` 实现，走的是原版疾跑逻辑，
+> 客户端 `isSprinting()` 和服务端 `player.isSprinting()` 始终一致，**不会触发此检测**。
+> 此检测只能抓到绕过引擎直接伪造 sprint 状态的外挂。
+
 ### 预留位置
 - VenusAntiCheat 的 Moving 检测模块中
 - 在移动事件回调里查询客户端报告的状态进行交叉验证

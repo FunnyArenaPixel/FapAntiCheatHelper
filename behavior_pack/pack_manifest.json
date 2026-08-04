@@ -1,0 +1,24 @@
+{
+    "format_version": 1,
+    "header": {
+        "name": "FapACH-beh",
+        "description": "FAPIXEL AntiCheat Helper Behavior Pack",
+        "uuid": "ea6986a9-4fde-41be-a718-0cdca2607695",
+        "version": [0, 0, 1],
+        "min_engine_version": [1, 18, 0]
+    },
+    "modules": [
+        {
+            "type": "data",
+            "description": "FapACH Data Module",
+            "uuid": "8b66ca02-ce24-48ea-9247-f1a5fccc6068",
+            "version": [0, 0, 1]
+        }
+    ],
+    "dependencies": [
+        {
+            "uuid": "9bb55178-696e-4f8f-8881-52957253f3a0",
+            "version": [0, 0, 1]
+        }
+    ]
+}

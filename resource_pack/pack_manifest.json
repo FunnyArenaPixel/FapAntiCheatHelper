@@ -1,0 +1,18 @@
+{
+    "format_version": 1,
+    "header": {
+        "name": "FapACH-res",
+        "description": "FAPIXEL AntiCheat Helper Resource Pack",
+        "uuid": "9bb55178-696e-4f8f-8881-52957253f3a0",
+        "version": [0, 0, 1],
+        "min_engine_version": [1, 18, 0]
+    },
+    "modules": [
+        {
+            "type": "resources",
+            "description": "FapACH Resource Module",
+            "uuid": "fc02c5a5-1d4e-49d8-90c9-36fee7738e33",
+            "version": [0, 0, 1]
+        }
+    ]
+}

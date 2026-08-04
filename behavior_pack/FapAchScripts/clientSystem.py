@@ -76,6 +76,12 @@ class FapAchClient(clientApi.GetClientSystemCls()):
         if self._enableAim:
             self.ListenForEvent(ns, sys, 'PlayerAttackEntityEvent', self, self._onAttackEntity)
 
+        # 移动 — 物品使用状态（NoSlowDown 检测）
+        if self._enableMove:
+            self.ListenForEvent(ns, sys, 'ClientItemTryUseEvent', self, self._onItemTryUse)
+            self.ListenForEvent(ns, sys, 'ItemReleaseUsingClientEvent', self, self._onItemReleaseUsing)
+            self.ListenForEvent(ns, sys, 'OnCarriedNewItemChangedClientEvent', self, self._onCarriedItemChanged)
+
         # 配置同步（服务端 → 客户端）
         self.ListenForEvent(
             modConfig.mod_name, modConfig.server_system_name,
@@ -136,6 +142,18 @@ class FapAchClient(clientApi.GetClientSystemCls()):
     def _onAttackEntity(self, args):
         """攻击实体事件 — 准星目标采集。"""
         self._aim.onAttackEntity(self, args)
+
+    def _onItemTryUse(self, args):
+        """右键使用物品 — 标记 usingItem 状态。"""
+        self._move.setUsingItem(True)
+
+    def _onItemReleaseUsing(self, args):
+        """释放使用中的物品 — 清除 usingItem 状态。"""
+        self._move.setUsingItem(False)
+
+    def _onCarriedItemChanged(self, args):
+        """切换主手物品 — 使用物品被打断，重置 usingItem。"""
+        self._move.setUsingItem(False)
 
     # ==========================================================
     # 输入模式检测（准星检测的触屏兼容性）
